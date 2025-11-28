@@ -3,7 +3,7 @@
 """
 import math
 import typing
-
+from contextlib import nullcontext
 import einops
 from functools import partial
 import torch
@@ -180,8 +180,13 @@ class LayerNorm(nn.Module):
     self.weight = nn.Parameter(torch.ones([dim]))
     self.dim = dim
   def forward(self, x):
-    with torch.cuda.amp.autocast(enabled=False):
-      x = F.layer_norm(x.float(), [self.dim])
+    if x.device.type == 'cpu':
+        ctx = nullcontext()
+    else:
+        ctx = torch.autocast(device_type=x.device.type, enabled=False)
+        
+    with ctx:
+        x = F.layer_norm(x.float(), [self.dim])
     return x * self.weight[None,None,:]
 
 
@@ -349,7 +354,11 @@ class DDiTBlock(nn.Module):
       'b s (three h d) -> b s three h d',
       three=3,
       h=self.n_heads)
-    with torch.cuda.amp.autocast(enabled=False):
+    if qkv.device.type == 'cpu':
+        ctx = nullcontext()
+    else:
+        ctx = torch.autocast(device_type=qkv.device.type, enabled=False)
+    with ctx:
       cos, sin = rotary_cos_sin
       qkv = apply_rotary_pos_emb_torchscript(
         qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
@@ -565,7 +574,11 @@ class DITBackbone(nn.Module):
       mask = None
       rotary_cos_sin = self.rotary_emb(x)
 
-    with torch.cuda.amp.autocast(dtype=self.precision):
+    if x.device.type == 'cpu':
+        ctx = nullcontext()
+    else:
+        ctx = torch.autocast(device_type=x.device.type, dtype=self.precision)
+    with ctx:
       for i in range(len(self.blocks)):
         x = self.blocks[i](x, 
                            rotary_cos_sin,
@@ -606,7 +619,7 @@ class BD3LM(transformers.PreTrainedModel):
         eval_batch_size,
         self.config.model_length,
         self.config.hidden_dim * 3,
-        device='cuda',
+        device=self.device,
         dtype=torch.bfloat16)
       block.cache_idx = 0
 

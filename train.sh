@@ -29,14 +29,14 @@ if [[ "$SLURM_JOB_NAME" == "intern" ]]; then
     NNODES=1
     # NGPUS=1
     command="torchrun"
-    CONFIG_NAME=${CONFIG_NAME:-"llada_400m"}
+    CONFIG_NAME="bd3lm_400m"
     head_node_ip=$(hostname --ip-address)
 else
     nodes=($(scontrol show hostnames $SLURM_JOB_NODELIST))
     head_node=${nodes[0]}
     NNODES=${#nodes[@]}
     command="srun torchrun"
-    CONFIG_NAME=$SLURM_JOB_NAME
+    CONFIG_NAME="bd3lm_400m"
     head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
 fi
 
