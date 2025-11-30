@@ -288,7 +288,8 @@ class DataCollatorForRandomTimeMask:
         # 2) 采样 t（按样本一个 t），扩展到 (B, L)
         t = torch.rand(B, 1, dtype=torch.float32)              # CPU
         t = torch.clamp_min(t, 1e-4)
-        t = t.repeat(1, L)  
+        # Create a broadcasted version for masking logic (B, L)
+        t_broadcast = t.view(B, 1).repeat(1, L).to(device)
 
         # 3) 形成可遮盖位置（默认不遮盖特殊符号）
         can_mask = torch.ones_like(input_ids, dtype=torch.bool, device=device)
@@ -302,7 +303,8 @@ class DataCollatorForRandomTimeMask:
         # 若不想在 padding 上遮盖，也可加：can_mask &= (attention_mask.bool())
 
         # 4) 以概率 t 进行逐 token 采样，但只允许在 can_mask==True 的位置
-        bern = torch.bernoulli(t).bool()
+        # Use broadcasted t for Bernoulli sampling
+        bern = torch.bernoulli(t_broadcast).bool()
         mask = bern & can_mask
 
         # 5) 生成 corrupted 与 labels
@@ -329,10 +331,19 @@ class RandomTimeMaskTrainer(Trainer):
         labels = inputs.pop("labels")
         t = inputs.pop("t")  # (B, L)
 
-        outputs = model(**inputs)
-        logits = outputs.logits  # (B, L, V)
+        if "attention_mask" in inputs:
+            inputs.pop("attention_mask")
+        
+        # Pass 1D timesteps to model
+        inputs["timesteps"] = t.to(inputs["input_ids"].device)
+
+        logits = model(**inputs)
 
         B, L, V = logits.shape
+
+        if labels.shape[1] > L:
+            labels = labels[:, :L]
+        
         per_tok = F.cross_entropy(
             logits.view(-1, V),
             labels.view(-1),
@@ -341,10 +352,11 @@ class RandomTimeMaskTrainer(Trainer):
         ).view(B, L)
 
         # 1/t 加权；注意 t 与 per_tok 的形状一致
-        loss = (per_tok / t).mean()
+        t_broadcast = t.view(B, 1).to(per_tok.device)
+        loss = (per_tok / t_broadcast).mean()
 
         # 把 t 放回去，以免后续 callback 需要
-        inputs["t"] = t
+        inputs["t"] = t.to(torch.bfloat16 if torch.cuda.is_available() else t.dtype)
         if return_outputs:
             return loss, outputs
         return loss

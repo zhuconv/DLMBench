@@ -14,13 +14,17 @@
 # cd /cusp-data-efa/peihaow/jz/IBSSM
 
 export SLURM_CPU_BIND=none
-export HF_HOME="/vcc-data/peihaow/huggingface"
-export HF_HUB_CACHE="/vcc-data/peihaow/huggingface/hub"
-export HF_DATASETS_CACHE="/vcc-data/peihaow/huggingface/datasets"
+export HF_HOME="/home/vn5378/.cache/huggingface"
+export HF_HUB_CACHE="/home/vn5378/.cache/huggingface/hub"
+export HF_DATASETS_CACHE="/home/vn5378/.cache/huggingface/datasets"
 export LOGLEVEL=INFO
 export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}
 export WANDB_MODE=disabled 
 export CUDA_LAUNCH_BLOCKING=1
+export SLURM_JOB_NAME="intern"
+
+export TORCH_COMPILE_BACKEND=none
+export TORCHINDUCTOR_FALLBACK=1
 
 
 # --- Detect nodes ---
@@ -29,14 +33,14 @@ if [[ "$SLURM_JOB_NAME" == "intern" ]]; then
     NNODES=1
     # NGPUS=1
     command="torchrun"
-    CONFIG_NAME=${CONFIG_NAME:-"llada_400m"}
+    CONFIG_NAME="duo_400m"
     head_node_ip=$(hostname --ip-address)
 else
     nodes=($(scontrol show hostnames $SLURM_JOB_NODELIST))
     head_node=${nodes[0]}
     NNODES=${#nodes[@]}
     command="srun torchrun"
-    CONFIG_NAME=$SLURM_JOB_NAME
+    CONFIG_NAME="duo_400m"
     head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
 fi
 
@@ -45,7 +49,7 @@ CONFIG_PATH="./configs/${CONFIG_NAME}.json"
 
 echo "Head Node IP: $head_node_ip; NNODES: $NNODES"
 
-NGPUS=${NGPUS:-8}
+NGPUS=${NGPUS:-1}
 
 ### Hyperparameters
 setting=${setting:-"20B/4k"}

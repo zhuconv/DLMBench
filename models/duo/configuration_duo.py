@@ -3,7 +3,7 @@ from transformers import AutoConfig, PretrainedConfig
 
 class DUOConfig(PretrainedConfig):
   """Hugging Face configuration class for DUO."""
-  model_type = 'DUO'
+  model_type = 'duo'
 
   def __init__(
     self,

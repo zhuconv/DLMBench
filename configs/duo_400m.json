@@ -1,0 +1,17 @@
+{
+  "architectures": ["DUO"],
+  "causal": false,
+  "cond_dim": 1024,
+  "dropout": 0.1,
+  "hidden_dim": 1024,
+  "model_length": 1024,
+  "model_type": "duo",
+  "n_blocks": 24,
+  "n_heads": 16,
+  "return_dict": false,
+  "time_conditioning": true,
+  "torch_dtype": "float32",
+  "transformers_version": "4.40.2",
+  "var_min": true,
+  "vocab_size": 126464
+}

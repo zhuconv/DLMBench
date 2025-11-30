@@ -10,8 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformers
-
-from .config import DUOConfig
+from transformers import AutoModel
+from .configuration_duo import DUOConfig
 
 # Flags required to enable jit fusion kernels
 torch._C._jit_set_profiling_mode(False)
@@ -210,11 +210,11 @@ class TimestepEmbedder(nn.Module):
       embedding = torch.cat(
         [embedding,
          torch.zeros_like(embedding[:, :1])], dim=-1)
-    return embedding
+    return embedding.to(torch.bfloat16 if torch.cuda.is_available else embedding.dtype)
 
   def forward(self, t):
     t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
-    t_emb = self.mlp(t_freq)
+    t_emb = self.mlp(torch.squeeze(t_freq) if len(t_freq.shape) == 3 else t_freq)
     return t_emb
 
 
@@ -340,7 +340,6 @@ class DDiTBlock(nn.Module):
 
 
   def forward(self, x, rotary_cos_sin, c=None):
-
     bias_dropout_scale_fn = self._get_bias_dropout_scale()
 
     x_skip = x
@@ -352,7 +351,7 @@ class DDiTBlock(nn.Module):
       # "" .chunk(6, dim=2) returns 6 tuples of shapes (128, 1, 256)
       (shift_msa, scale_msa, gate_msa, shift_mlp,
        scale_mlp, gate_mlp) = self.adaLN_modulation(c)[:, None].chunk(6, dim=2)
-      x = modulate_fused(x, shift_msa, scale_msa)
+      x = modulate_fused(x, shift_msa, scale_msa).to(torch.bfloat16 if torch.cuda.is_bf16_supported else x.dtype)
 
     qkv = einops.rearrange(
       self.attn_qkv(x),
@@ -371,8 +370,8 @@ class DDiTBlock(nn.Module):
                                 self.dropout)
       x = bias_dropout_scale_fn(
         self.mlp(modulate_fused(
-          self.norm2(x), shift_mlp, scale_mlp)),
-        None, gate_mlp, x, self.dropout)
+          self.norm2(x).to(torch.bfloat16 if torch.cuda.is_bf16_supported else x.dtype), shift_mlp, scale_mlp)),
+        None, gate_mlp, x, self.dropout).to(torch.bfloat16 if torch.cuda.is_bf16_supported else x.dtype)
     else:
       scale = torch.ones(1, device=x.device, dtype=x.dtype)
       x = bias_dropout_scale_fn(
@@ -419,7 +418,7 @@ class DDiTFinalLayer(nn.Module):
     x = self.norm_final(x)
     if self.adaLN:
       shift, scale = self.adaLN_modulation(c)[:, None].chunk(2, dim=2)
-      x = modulate_fused(x, shift, scale)
+      x = modulate_fused(x, shift, scale).to(torch.bfloat16 if torch.cuda.is_bf16_supported else x.dtype)
     x = self.linear(x)
     return x
 
@@ -571,6 +570,7 @@ class DUO(transformers.PreTrainedModel):
       timesteps: torch.FloatTensor = None,
       output_hidden_states: typing.Optional[bool] = None,
       return_dict: typing.Optional[bool] = None,
+      **kwargs,
   ) -> typing.Union[
     torch.Tensor, typing.Tuple,
     transformers.modeling_outputs.MaskedLMOutput]:
@@ -599,3 +599,5 @@ class DUO(transformers.PreTrainedModel):
       return logits, all_hidden_states
     else:
       return logits
+    
+AutoModel.register(DUOConfig, DUO)
