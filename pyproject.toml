@@ -1,0 +1,14 @@
+[project]
+name = "dlmbench"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "accelerate==0.34.2",
+    "datasets==3.6.0",
+    "deepspeed>=0.18.2",
+    "hf-xet>=1.2.0",
+    "lm-eval==0.4.8",
+    "transformers==4.52.0",
+]

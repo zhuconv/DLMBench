@@ -2,8 +2,8 @@
 ## Environment
 ```bash
 pip install uv
-uv install transformers==4.49.0 lm_eval==0.4.8 accelerate==0.34.2 datasets==3.6.0
-uv install deepspeed hf_xet
+uv pip install transformers==4.52.0 lm_eval==0.4.8 accelerate==0.34.2 datasets==3.6.0
+uv pip install deepspeed hf_xet
 ```
 
 ## Data Preparation
