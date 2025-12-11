@@ -10,12 +10,7 @@
 
 # source ~/.bashrc
 # conda activate ibm
-# cd /cusp-data-efa/peihaow/jz/IBSSM
 
-export SLURM_CPU_BIND=none
-# export HF_HOME="/vcc-data/peihaow/huggingface"
-# export HF_HUB_CACHE="/vcc-data/peihaow/huggingface/hub"
-# export HF_DATASETS_CACHE="/vcc-data/peihaow/huggingface/datasets"
 export LOGLEVEL=INFO
 export TRITON_CACHE_DIR=/tmp/triton_cache
 export WANDB_MODE=disabled 

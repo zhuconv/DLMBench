@@ -1,12 +1,8 @@
 
 
 # Set the environment variables first before running the command.
-export HF_HOME="/vcc-data/peihaow/huggingface"
-export HF_HUB_CACHE="/vcc-data/peihaow/huggingface/hub"
-export HF_DATASETS_CACHE="/vcc-data/peihaow/huggingface/datasets"
 export HF_ALLOW_CODE_EVAL=1
 export HF_DATASETS_TRUST_REMOTE_CODE=true
-export HF_TOKEN=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
 
 
 MODEL_PATH='ar_700m/checkpoint-5500'  # path to the fine-tuned LLaDA-400M model
