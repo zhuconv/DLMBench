@@ -22,7 +22,7 @@ export WANDB_MODE=disabled
 export CUDA_LAUNCH_BLOCKING=1
 
 
-CONFIG_NAME=$1  # "mdm_700m" "bdm_700m" "ar_700m" "duo_700m"
+CONFIG_NAME=$1  # "mdm_700m" "bdm_700m" "ar_700m" "udm_700m"
 # --- Detect nodes ---
 if [[ -z "${SLURM_JOB_NAME:-}" || "$SLURM_JOB_NAME" == "intern" ]]; then
     echo "Interactive mode detected."
@@ -70,6 +70,7 @@ max_steps=$(( max_tokens / (global_batch_size * 4096) ))
 
 # python -m debugpy --wait-for-client --listen 0.0.0.0:5000 -m torch.distributed.launch
 export CUDA_VISIBLE_DEVICES=0,1,2,3
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 ${command} --nproc_per_node $NGPUS --nnodes $NNODES \
         --rdzv_endpoint $head_node_ip:29512 \
@@ -93,7 +94,7 @@ ${command} --nproc_per_node $NGPUS --nnodes $NNODES \
         --adam_beta2 0.98 \
         --lr_scheduler_type cosine_with_min_lr \
         --lr_scheduler_kwargs '{"min_lr_rate": 0.1}' \
-        --save_steps 100 \
+        --save_steps 10 \
         --logging_steps 10 \
         --do_train True \
         --do_predict True \

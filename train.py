@@ -446,9 +446,10 @@ def train():
     elif "mdm" in model_args.config.lower():
         DiffusionTrainer = MaskedDiffusionTrainer
         Model_CLS = AutoModel
-    elif "duo" in model_args.config.lower():
+    elif "udm" in model_args.config.lower():
         DiffusionTrainer = UniformDiffusionTrainer
         Model_CLS = AutoModel
+        config.model_length = training_args.context_len
     elif "ar" in model_args.config.lower():
         from transformers import Trainer as DiffusionTrainer
         config.max_position_embeddings = training_args.context_len
