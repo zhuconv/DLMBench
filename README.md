@@ -10,6 +10,12 @@ uv pip install deepspeed hf_xet
 Nothing to do.
 This is because in `train.py:get_streaming_dataset` we implement a default setting of loading streaming dataset from `DKYoon/SlimPajama-6B`.
 
+# Training
+
+```bash
+bash train.sh arm_700m # bdm_700m, mdm_700m, udm_700m
+```
+
 # Evaluation
 In this file, we provide the code for the evaluation of [LLaDA-8B-Base](https://huggingface.co/GSAI-ML/LLaDA-8B-Base),
 [LLaDA-8B-Instruct](https://huggingface.co/GSAI-ML/LLaDA-8B-Instruct) and [LLaDA 1.5](https://arxiv.org/abs/2505.19223).

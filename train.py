@@ -353,6 +353,39 @@ class MaskedDiffusionTrainer(Trainer):
             return loss, outputs
         return loss
 
+class UniformDiffusionTrainer(Trainer):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels = inputs.pop("labels")
+        t = inputs.pop("t") # This is (B,)
+
+        if "attention_mask" in inputs:
+            inputs.pop("attention_mask")
+
+        # Pass 1D timesteps to model
+        inputs["timesteps"] = t.squeeze().to(inputs["input_ids"].device)
+        
+        outputs = model(**inputs)
+        logits = outputs
+
+        B, L, V = logits.shape
+        
+        if labels.shape[1] > L:
+            labels = labels[:, :L]
+
+        per_tok = F.cross_entropy(
+            logits.reshape(-1, V),
+            labels.reshape(-1),
+            reduction="none",
+            ignore_index=-100
+        ).view(B, L)
+
+        t_broadcast = t.view(B, 1).to(per_tok.device)
+        loss = (per_tok / t_broadcast).mean()
+
+        inputs["t"] = t
+        if return_outputs:
+            return loss, outputs
+        return loss
 
 
 class BlockDiffusionTrainer(Trainer):
@@ -413,6 +446,9 @@ def train():
     elif "mdm" in model_args.config.lower():
         DiffusionTrainer = MaskedDiffusionTrainer
         Model_CLS = AutoModel
+    elif "duo" in model_args.config.lower():
+        DiffusionTrainer = UniformDiffusionTrainer
+        Model_CLS = AutoModel
     elif "ar" in model_args.config.lower():
         from transformers import Trainer as DiffusionTrainer
         config.max_position_embeddings = training_args.context_len
@@ -421,7 +457,7 @@ def train():
     model = Model_CLS.from_config(config)
 
     if training_args.local_rank == 0:
-        print(f"Training new model from scratch - Total Size={count_func(model)/2**20:.2f}M parameters")
+        print(f"Training new model {model_args.config} from scratch - Total Size={count_func(model)/2**20:.2f}M parameters")
 
     # elif model_args.model_name_or_path:
     #     # config = AutoConfig.from_pretrained(model_args.model_name_or_path)

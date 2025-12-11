@@ -13,22 +13,22 @@
 # cd /cusp-data-efa/peihaow/jz/IBSSM
 
 export SLURM_CPU_BIND=none
-export HF_HOME="/vcc-data/peihaow/huggingface"
-export HF_HUB_CACHE="/vcc-data/peihaow/huggingface/hub"
-export HF_DATASETS_CACHE="/vcc-data/peihaow/huggingface/datasets"
+# export HF_HOME="/vcc-data/peihaow/huggingface"
+# export HF_HUB_CACHE="/vcc-data/peihaow/huggingface/hub"
+# export HF_DATASETS_CACHE="/vcc-data/peihaow/huggingface/datasets"
 export LOGLEVEL=INFO
-export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}
+export TRITON_CACHE_DIR=/tmp/triton_cache
 export WANDB_MODE=disabled 
 export CUDA_LAUNCH_BLOCKING=1
 
 
-CONFIG_NAME=$SLURM_JOB_NAME  # "mdm_700m" "bdm_700m" "ar_700m"
+CONFIG_NAME=$1  # "mdm_700m" "bdm_700m" "ar_700m" "duo_700m"
 # --- Detect nodes ---
-if [[ "$SLURM_JOB_NAME" == "intern" ]]; then
+if [[ -z "${SLURM_JOB_NAME:-}" || "$SLURM_JOB_NAME" == "intern" ]]; then
     echo "Interactive mode detected."
     NNODES=1
     # NGPUS=1
-    CONFIG_NAME="ar_700m"
+    # CONFIG_NAME="ar_700m"
     command="torchrun"
     head_node_ip=$(hostname --ip-address)
 else
@@ -44,7 +44,7 @@ CONFIG_PATH="./configs/${CONFIG_NAME}.json"
 
 echo "Head Node IP: $head_node_ip; NNODES: $NNODES"
 
-NGPUS=${NGPUS:-8}
+NGPUS=${NGPUS:-4}
 
 ### Hyperparameters
 setting=${setting:-"20B/4k"}
@@ -52,7 +52,7 @@ setting=${setting:-"20B/4k"}
 if [[ $setting == *"4k"* ]]; then
   global_batch_size=512
   local_batch_size=$(( 512 / NNODES ))
-  micro_batch_size=8   # = 4
+  micro_batch_size=4   # = 4
 fi
 # ==== max_tokens ====
 if [[ $setting == *"20B"* ]]; then
@@ -69,6 +69,7 @@ max_steps=$(( max_tokens / (global_batch_size * 4096) ))
 # "/vcc-data/peihaow/SlimPajama-627B"
 
 # python -m debugpy --wait-for-client --listen 0.0.0.0:5000 -m torch.distributed.launch
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 ${command} --nproc_per_node $NGPUS --nnodes $NNODES \
         --rdzv_endpoint $head_node_ip:29512 \
@@ -76,7 +77,7 @@ ${command} --nproc_per_node $NGPUS --nnodes $NNODES \
         --rdzv_backend c10d \
         train.py \
         --deepspeed "ds_config.json" \
-        --dataset_cache_dir "../../hf_datasets/SlimPajama-627B" \
+        --dataset_cache_dir "../hf_datasets/SlimPajama-627B" \
         --output_dir "output/${CONFIG_NAME}" \
         --config ${CONFIG_PATH} \
         --resume_from_checkpoint true \

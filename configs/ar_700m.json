@@ -5,7 +5,7 @@
   "attention_bias": false,
   "attention_dropout": 0.0,
   "hidden_act": "silu",
-  "hidden_size": 1536,
+  "hidden_size": 1280,
   "initializer_range": 0.02,
   "intermediate_size": 5120,
   "attn_implementation": "flash_attention_2",
