@@ -22,6 +22,7 @@ import os
 import math
 import glob
 import random
+import csv
 from itertools import chain
 from dataclasses import dataclass, field
 from typing import Optional
@@ -548,7 +549,29 @@ def train():
         print("*** Set ignore_data_skip=True for streaming mode to save time ***")
 
 
-    trainer = DiffusionTrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
+    class CSVLoggerCallback(transformers.TrainerCallback):
+        def __init__(self, log_path="training_logs.csv"):
+            self.log_path = log_path
+            self.header_written = False
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if logs is None:
+                return
+            row = {
+                "step": state.global_step,
+                "epoch": state.epoch,
+                "loss": logs.get("loss", ""),
+                "learning_rate": logs.get("learning_rate", ""),
+            }
+            file_exists = os.path.isfile(self.log_path)
+            with open(self.log_path, mode='a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=["step", "epoch", "loss", "learning_rate"])
+                if not file_exists and not self.header_written:
+                    writer.writeheader()
+                    self.header_written = True
+                writer.writerow(row)
+
+    trainer = DiffusionTrainer(model=model, tokenizer=tokenizer, args=training_args, callbacks=[CSVLoggerCallback()], **data_module)
     model.config.use_cache = False
 
     if training_args.do_train:
