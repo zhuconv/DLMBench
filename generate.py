@@ -2,7 +2,12 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, AutoConfig
+from models.llada.configuration_llada import LLaDAConfig
+from models.llada.modeling_llada import LLaDAModelLM
+
+AutoConfig.register("llada", LLaDAConfig)
+AutoModel.register(LLaDAConfig, LLaDAModelLM)
 
 
 def add_gumbel_noise(logits, temperature):
@@ -121,10 +126,15 @@ def generate(model, prompt, attention_mask=None, steps=128, gen_length=128, bloc
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_path', type=str, default='GSAI-ML/LLaDA-8B-Instruct')
+    args = parser.parse_args()
+
     device = 'cuda'
 
-    model = AutoModel.from_pretrained('GSAI-ML/LLaDA-8B-Instruct', trust_remote_code=True, torch_dtype=torch.bfloat16).to(device).eval()
-    tokenizer = AutoTokenizer.from_pretrained('GSAI-ML/LLaDA-8B-Instruct', trust_remote_code=True)
+    model = AutoModel.from_pretrained(args.model_path, trust_remote_code=True, torch_dtype=torch.bfloat16).to(device).eval()
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
 
     # The LLaDA architecture theoretically supports both left-padding and right-padding. 
     # However, the sampling code implementation is simpler with left-padding.

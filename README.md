@@ -22,10 +22,10 @@ To evaluate a model, set the `MODEL_PATH` environment variable to your checkpoin
 
 ```bash
 # Example for an AR model
-MODEL_PATH=output/ar_700m/checkpoint-500 bash eval.sh
+MODEL_PATH=ar_700m/checkpoint-500 bash eval.sh
 
 # Example for a Masked Diffusion model
-MODEL_PATH=output/mdm_700m/checkpoint-1000 bash eval.sh
+MODEL_PATH=mdm_700m/checkpoint-1000 bash eval.sh
 ```
 
 ## Acknowledgments

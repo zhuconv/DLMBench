@@ -3,9 +3,10 @@
 # Set the environment variables first before running the command.
 export HF_ALLOW_CODE_EVAL=1
 export HF_DATASETS_TRUST_REMOTE_CODE=true
+source .venv/bin/activate
 
-
-MODEL_PATH='ar_700m/checkpoint-5500'  # path to the fine-tuned LLaDA-400M model
+# MODEL_PATH is expected to be passed as an environment variable.
+# MODEL_PATH='ar_700m/checkpoint-5500'  # path to the fine-tuned LLaDA-700M model
 if [[ $MODEL_PATH == *mdm* ]]; then
     SCRIPT='eval_mdm.py'
     MODEL='mdm_dist'
