@@ -284,7 +284,12 @@ class DataCollatorForRandomTimeMask:
             pad_to_multiple_of=self.pad_to_multiple_of
         )
         input_ids = batch["input_ids"]               # (B, L)
+        if input_ids.ndim == 3 and input_ids.shape[1] == 1:
+            input_ids = input_ids.squeeze(1)
+
         attention_mask = batch["attention_mask"]     # (B, L)
+        if attention_mask.ndim == 3 and attention_mask.shape[1] == 1:
+            attention_mask = attention_mask.squeeze(1)
 
         B, L = input_ids.size()
         device = input_ids.device
@@ -391,7 +396,13 @@ class UniformDiffusionTrainer(Trainer):
 
 class BlockDiffusionTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        if "input_ids" in inputs and inputs["input_ids"].ndim == 3 and inputs["input_ids"].shape[1] == 1:
+            inputs["input_ids"] = inputs["input_ids"].squeeze(1)
+        
         labels = inputs.pop("labels")
+        if labels.ndim == 3 and labels.shape[1] == 1:
+            labels = labels.squeeze(1)
+
         t = inputs.pop("t") # This is (B,)
 
         if "attention_mask" in inputs:

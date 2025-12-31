@@ -1,5 +1,3 @@
-
-
 # Set the environment variables first before running the command.
 export HF_ALLOW_CODE_EVAL=1
 export HF_DATASETS_TRUST_REMOTE_CODE=true
@@ -13,6 +11,9 @@ if [[ $MODEL_PATH == *mdm* ]]; then
 elif [[ $MODEL_PATH == *bdm* ]]; then
     SCRIPT='eval_bdm.py'
     MODEL='bdm_dist'
+elif [[ $MODEL_PATH == *udm* ]]; then 
+    SCRIPT='eval_udm.py'
+    MODEL='udm_dist'
 elif [[ $MODEL_PATH == *ar* ]]; then
     SCRIPT='-m lm_eval'
     MODEL='hf'
