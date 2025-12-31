@@ -401,8 +401,10 @@ class DDiTBlock(nn.Module):
     bias_dropout_scale_fn = self._get_bias_dropout_scale()
 
     if self.adaln:
-      (shift_msa, scale_msa, gate_msa, shift_mlp,
-      scale_mlp, gate_mlp) = self.adaLN_modulation(c)[:, None].chunk(6, dim=2)
+      ada_out = self.adaLN_modulation(c)
+      if ada_out.ndim == 2:
+          ada_out = ada_out[:, None]
+      (shift_msa, scale_msa, gate_msa, shift_mlp,scale_mlp, gate_mlp) = ada_out.chunk(6, dim=-1)
 
     # attention operation
     x_skip = x
@@ -480,7 +482,10 @@ class DDitFinalLayer(nn.Module):
 
   def forward(self, x, c):
     if self.adaln:
-      shift, scale = self.adaLN_modulation(c)[:, None].chunk(2, dim=2)
+      ada_out = self.adaLN_modulation(c)
+      if ada_out.ndim == 2:
+          ada_out = ada_out[:, None]
+      shift, scale = ada_out.chunk(2, dim=-1)
       x = modulate_fused(self.norm_final(x), shift, scale)
     else:
       x = self.norm_final(x)

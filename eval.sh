@@ -22,6 +22,10 @@ else
     exit 1
 fi
 
+# Set tasks
+# "lambada_openai,hellaswag,piqa,arc_challenge,arc_easy,winogrande,mmlu,gpqa"
+TASKS='arc_challenge,piqa,hellaswag'
+
 # Set a limit for quick testing. Comment out or set to empty for full evaluation.
 LIMIT=20
 LIMIT_ARG=""
@@ -30,7 +34,7 @@ if [ -n "$LIMIT" ]; then
 fi
 
 accelerate launch $SCRIPT \
-    --tasks arc_challenge,piqa,hellaswag \
+    --tasks $TASKS \
     --model $MODEL\
     --batch_size 32 \
     $LIMIT_ARG \
