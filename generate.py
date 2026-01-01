@@ -377,10 +377,8 @@ def main():
         model = AutoModelForCausalLM.from_pretrained(args.model_path, trust_remote_code=True, torch_dtype=torch.bfloat16).to(device).eval()
 
     # Load Tokenizer
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True, fix_mistral_regex=True)
-    except TypeError:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    # Force load the base tokenizer to avoid mismatch/gibberish output
+    tokenizer = AutoTokenizer.from_pretrained("GSAI-ML/LLaDA-8B-Base", trust_remote_code=True)
         
     if tokenizer.padding_side != 'left':
         tokenizer.padding_side = 'left'
@@ -415,7 +413,7 @@ def main():
     )
 
     # Decode
-    generated_text = tokenizer.batch_decode(out[:, inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+    generated_text = tokenizer.batch_decode(out[:, inputs['input_ids'].shape[1]:], skip_special_tokens=False)
     
     for i, text in enumerate(generated_text):
         print(f"\nPrompt {i+1}: {prompts[i]}")
