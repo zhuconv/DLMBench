@@ -295,7 +295,7 @@ class DataCollatorForMaskedDiffusion:
         # LLaDA/MDM loss weight is -1/t
         loss_scale = -1.0 / t
         # Expand loss_scale to match (B, L) for the trainer
-        loss_scale = loss_scale.expand(B, L)
+        loss_scale = loss_scale.expand(B, L).clone()
         
         return {"input_ids": input_ids, "labels": labels, "attention_mask": batch["attention_mask"], "loss_scale": loss_scale}
 
@@ -342,40 +342,51 @@ class DataCollatorForBlockDiffusion:
     
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         batch = self.tokenizer.pad(features, padding=True, return_tensors="pt", pad_to_multiple_of=self.pad_to_multiple_of)
-        input_ids = batch["input_ids"] # Clean x0
+        input_ids = batch["input_ids"] 
         B, L = input_ids.shape
         
         num_blocks = (L + self.block_size - 1) // self.block_size
         
-        # Sample t uniformly
+        # Sample timesteps
         sampling_eps_min = 1e-3
         sampling_eps_max = 1.0
-        t_blocks = torch.rand(B, num_blocks, device=input_ids.device) * (sampling_eps_max - sampling_eps_min) + sampling_eps_min
+        t_blocks = torch.rand(B, num_blocks, device=input_ids.device)
+        t_blocks = t_blocks * (sampling_eps_max - sampling_eps_min) + sampling_eps_min
+        
+        # Expand to token level
         t_expanded = t_blocks.repeat_interleave(self.block_size, dim=1)[:, :L]
         
-        # Get loss scale and move prob from noise schedule
+        # Get noise params
         loss_scale, p = self.noise(t_expanded)
         
-        # Sample masks based on p
+        # Create noisy input (xt)
         mask_indices = torch.rand_like(p) < p
-        
-        # Create xt (masked input)
         xt = input_ids.clone()
         xt[mask_indices] = self.tokenizer.mask_token_id
-        
-        # Calculate sigma for conditioning
         sigma = self._sigma_from_p(p)
         
-        # Dual-Stream Input: [Noisy, Clean]
-        model_input = torch.cat([xt, input_ids], dim=1)
+        # 5. Dual-Stream concatenation [xt, x0]
+        model_input = torch.cat([xt, input_ids], dim=1) # Shape: (B, 2L)
         
+        # The clean history (x0) has 0 noise, so sigma=0
+        sigma_clean = torch.zeros_like(sigma)
+        sigma_full = torch.cat([sigma, sigma_clean], dim=1) # Shape: (B, 2L)
+
+        loss_scale_clean = torch.zeros_like(loss_scale)
+        loss_scale_full = torch.cat([loss_scale, loss_scale_clean], dim=1) # Shape: (B, 2L)
+        
+        # Create labels
         labels = torch.full((B, 2*L), -100, dtype=input_ids.dtype, device=input_ids.device)
         labels_xt = input_ids.clone()
         labels_xt[~mask_indices] = -100
         labels[:, :L] = labels_xt
         
-        # Pass loss_scale to compute_loss
-        return {"input_ids": model_input, "labels": labels, "timesteps": sigma, "loss_scale": loss_scale}
+        return {
+            "input_ids": model_input, 
+            "labels": labels, 
+            "timesteps": sigma_full, 
+            "loss_scale": loss_scale_full
+        }
 
 class DiffusionTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
