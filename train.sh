@@ -58,7 +58,7 @@ fi
 # ==== final args ====
 batch_size=$(( local_batch_size / NGPUS ))
 gradient_accumulation_steps=$(( batch_size / micro_batch_size ))
-max_steps=$(( max_tokens / (global_batch_size * 4096) )) 
+max_steps=5
 
 # ../../hf_datasets/SlimPajama-627B
 # "/vcc-data/peihaow/SlimPajama-627B"
@@ -77,7 +77,7 @@ ${command} --nproc_per_node $NGPUS --nnodes $NNODES \
         --output_dir "output/${CONFIG_NAME}" \
         --config ${CONFIG_PATH} \
         --resume_from_checkpoint true \
-        --per_device_train_batch_size $micro_batch_size \
+        --per_device_train_batch_size 1 \
         --gradient_accumulation_steps $gradient_accumulation_steps \
         --report_to none \
         --max_steps $max_steps \
@@ -87,12 +87,10 @@ ${command} --nproc_per_node $NGPUS --nnodes $NNODES \
         --learning_rate 4e-4 \
         --adam_beta1 0.9 \
         --adam_beta2 0.98 \
-        --lr_scheduler_type cosine_with_min_lr \
-        --lr_scheduler_kwargs '{"min_lr_rate": 0.1}' \
-        --save_steps 10 \
-        --logging_steps 10 \
+        --save_steps 5 \
+        --logging_steps 1 \
         --do_train True \
         --do_predict True \
         --save_strategy "steps" \
-        --gradient_checkpointing False \
+        --gradient_checkpointing True \
         --bf16 True

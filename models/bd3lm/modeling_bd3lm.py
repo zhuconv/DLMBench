@@ -106,7 +106,7 @@ def modulate(x: torch.Tensor,
              scale: torch.Tensor) -> torch.Tensor:
   return x * (1 + scale) + shift
 
-@torch.jit.script
+
 def bias_dropout_add_scale_fused_train(
     x: torch.Tensor,
     bias: typing.Optional[torch.Tensor],
@@ -116,7 +116,7 @@ def bias_dropout_add_scale_fused_train(
   return bias_dropout_add_scale(
     x, bias, scale, residual, prob, True)
 
-@torch.jit.script
+
 def bias_dropout_add_scale_fused_inference(
     x: torch.Tensor,
     bias: typing.Optional[torch.Tensor],
@@ -126,7 +126,7 @@ def bias_dropout_add_scale_fused_inference(
   return bias_dropout_add_scale(
     x, bias, scale, residual, prob, False)
 
-@torch.jit.script
+
 def modulate_fused(x: torch.Tensor,
                    shift: torch.Tensor,
                    scale: torch.Tensor) -> torch.Tensor:
@@ -167,9 +167,6 @@ def rotate_half(x):
 def apply_rotary_pos_emb_torchscript(qkv, cos, sin):
     return (qkv * cos) + (rotate_half(qkv) * sin)
 
-# function overload
-def modulate(x, shift, scale):
-  return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 #################################################################################
 #                                  Layers                                       #
@@ -224,13 +221,15 @@ class TimestepEmbedder(nn.Module):
     :param max_period: controls the minimum frequency of the embeddings.
     :return: an (N, D) Tensor of positional embeddings.
     """
+    if t.ndim == 0:
+        t = t.unsqueeze(0)
     # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
     half = dim // 2
     freqs = torch.exp(
       - math.log(max_period)
       * torch.arange(start=0, end=half, dtype=torch.float32)
       / half).to(device=t.device)
-    args = t[:, None].float() * freqs[None]
+    args = t.unsqueeze(-1).float() * freqs
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     if dim % 2:
       embedding = torch.cat(
@@ -322,6 +321,7 @@ class DDiTBlock(nn.Module):
     self.dropout2 = nn.Dropout(dropout)
     self.dropout = dropout
     self.adaln = adaln
+    self.gradient_checkpointing = False
     if self.adaln:
       self.adaLN_modulation = nn.Linear(cond_dim, 6 * dim, bias=True)
       self.adaLN_modulation.weight.data.zero_()
@@ -387,11 +387,24 @@ class DDiTBlock(nn.Module):
   
   def forward(self, x, rotary_cos_sin, c, mask=None,
               sample_mode=False, store_kv=False):
+    if self.gradient_checkpointing and self.training:
+      return torch.utils.checkpoint.checkpoint(
+          self._forward_body,
+          x, rotary_cos_sin, c, mask, sample_mode, store_kv,
+          use_reentrant=False
+      )
+    else:
+      return self._forward_body(x, rotary_cos_sin, c, mask, sample_mode, store_kv)
+
+  def _forward_body(self, x, rotary_cos_sin, c, mask=None,
+              sample_mode=False, store_kv=False):
     bias_dropout_scale_fn = self._get_bias_dropout_scale()
 
     if self.adaln:
-      (shift_msa, scale_msa, gate_msa, shift_mlp,
-      scale_mlp, gate_mlp) = self.adaLN_modulation(c)[:, None].chunk(6, dim=2)
+      ada_out = self.adaLN_modulation(c)
+      if ada_out.ndim == 2:
+          ada_out = ada_out[:, None]
+      (shift_msa, scale_msa, gate_msa, shift_mlp,scale_mlp, gate_mlp) = ada_out.chunk(6, dim=-1)
 
     # attention operation
     x_skip = x
@@ -469,7 +482,10 @@ class DDitFinalLayer(nn.Module):
 
   def forward(self, x, c):
     if self.adaln:
-      shift, scale = self.adaLN_modulation(c)[:, None].chunk(2, dim=2)
+      ada_out = self.adaLN_modulation(c)
+      if ada_out.ndim == 2:
+          ada_out = ada_out[:, None]
+      shift, scale = ada_out.chunk(2, dim=-1)
       x = modulate_fused(self.norm_final(x), shift, scale)
     else:
       x = self.norm_final(x)
@@ -534,9 +550,10 @@ class DITBackbone(nn.Module):
         partial(block_diff_mask, block_size=block_size, n=seqlen),
         B=None, H=None, Q_LEN=seqlen*2, KV_LEN=seqlen*2)
     elif attn_backend == 'sdpa' or not FLEX_ATTN_AVAILABLE:
-      self.mask = block_diff_mask(
+      mask = block_diff_mask(
         b=None, h=None, q_idx=torch.arange(seqlen*2)[:, None], 
         kv_idx=torch.arange(seqlen*2)[None, :], block_size=block_size, n=seqlen)
+      self.register_buffer('mask', mask, persistent=False)
     else:
       raise ValueError('Unknown attention backend')
 
@@ -544,6 +561,11 @@ class DITBackbone(nn.Module):
              store_kv=False, output_hidden_states=False):
     if not self.config.time_conditioning and self.adaln:
       sigma = torch.zeros_like(sigma)
+    
+    if indices.ndim == 3:
+      if indices.shape[1] == 1:
+        indices = indices.squeeze(1)
+
     all_hidden_states = []
     x = self.vocab_embed(indices)
     if output_hidden_states:
@@ -556,7 +578,18 @@ class DITBackbone(nn.Module):
       n = self.mask.shape[-1] // 2
       # use block-causal mask only during sampling
       if not sample_mode:
-        rotary_cos_sin = self.rotary_emb(x[:, :self.n])
+        curr_half_len = x.shape[1] // 2
+        if curr_half_len != self.n:
+          n = curr_half_len
+          if self.config.attn_backend == 'flex' and FLEX_ATTN_AVAILABLE:
+            mask = create_block_mask(
+              partial(block_diff_mask, block_size=self.block_size, n=n),
+              B=None, H=None, Q_LEN=n*2, KV_LEN=n*2).to(x.device)
+          else:
+            mask = block_diff_mask(
+              b=None, h=None, q_idx=torch.arange(n*2)[:, None], 
+              kv_idx=torch.arange(n*2)[None, :], block_size=self.block_size, n=n).to(x.device)
+        rotary_cos_sin = self.rotary_emb(x[:, :n])
       else:
         if self.blocks[0].kv_cache is not None:
           mask = None
@@ -597,6 +630,7 @@ class BD3LM(transformers.PreTrainedModel):
   """HF-compatible model."""
   config_class = BD3LMConfig
   base_model_prefix = "bd3lm"
+  supports_gradient_checkpointing = True
 
   def __init__(
     self,
@@ -612,6 +646,10 @@ class BD3LM(transformers.PreTrainedModel):
         'sampling_eps_max',
         torch.tensor(config.sampling_eps_max))
     
+  def _set_gradient_checkpointing(self, module, value=False):
+    if isinstance(module, DDiTBlock):
+      module.gradient_checkpointing = value
+
   def reset_kv_cache(self, eval_batch_size=1):
     for block in self.backbone.blocks:
       block.kv_cache = torch.zeros(

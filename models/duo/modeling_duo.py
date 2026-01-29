@@ -52,7 +52,6 @@ def modulate(x: torch.Tensor,
   return x * (1 + scale) + shift
 
 
-@torch.jit.script
 def bias_dropout_add_scale_fused_train(
     x: torch.Tensor,
     bias: typing.Optional[torch.Tensor],
@@ -63,7 +62,6 @@ def bias_dropout_add_scale_fused_train(
     x, bias, scale, residual, prob, True)
 
 
-@torch.jit.script
 def bias_dropout_add_scale_fused_inference(
     x: torch.Tensor,
     bias: typing.Optional[torch.Tensor],
@@ -74,7 +72,6 @@ def bias_dropout_add_scale_fused_inference(
     x, bias, scale, residual, prob, False)
 
 
-@torch.jit.script
 def modulate_fused(x: torch.Tensor,
                    shift: torch.Tensor,
                    scale: torch.Tensor) -> torch.Tensor:
@@ -199,6 +196,8 @@ class TimestepEmbedder(nn.Module):
     :return: an (N, D) Tensor of positional embeddings.
     """
     # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
+    if t.ndim == 0:
+        t = t.unsqueeze(0)
     half = dim // 2
     freqs = torch.exp(
       - math.log(max_period)
@@ -256,6 +255,7 @@ class DDiTBlockCausal(nn.Module):
       nn.Linear(mlp_ratio * dim, dim, bias=True))
     self.dropout2 = nn.Dropout(dropout)
     self.dropout = dropout
+    self.gradient_checkpointing = False
 
   def _get_bias_dropout_scale(self):
     if self.training:
@@ -264,6 +264,15 @@ class DDiTBlockCausal(nn.Module):
       return bias_dropout_add_scale_fused_inference
 
   def forward(self, x, rotary_cos_sin, **kwargs):
+    if self.gradient_checkpointing and self.training:
+      return torch.utils.checkpoint.checkpoint(
+        self._forward_body,
+        x, rotary_cos_sin,
+        use_reentrant=False
+      )
+    return self._forward_body(x, rotary_cos_sin)
+
+  def _forward_body(self, x, rotary_cos_sin, **kwargs):
     del kwargs
     batch_size, seq_len = x.shape[0], x.shape[1]
 
@@ -325,6 +334,7 @@ class DDiTBlock(nn.Module):
       nn.Linear(mlp_ratio * dim, dim, bias=True))
     self.dropout2 = nn.Dropout(dropout)
     self.dropout = dropout
+    self.gradient_checkpointing = False
 
     if self.adaLN:
       self.adaLN_modulation = nn.Linear(cond_dim, 6 * dim)
@@ -340,6 +350,15 @@ class DDiTBlock(nn.Module):
 
 
   def forward(self, x, rotary_cos_sin, c=None):
+    if self.gradient_checkpointing and self.training:
+      return torch.utils.checkpoint.checkpoint(
+        self._forward_body,
+        x, rotary_cos_sin, c,
+        use_reentrant=False
+      )
+    return self._forward_body(x, rotary_cos_sin, c)
+
+  def _forward_body(self, x, rotary_cos_sin, c=None):
     bias_dropout_scale_fn = self._get_bias_dropout_scale()
 
     x_skip = x
@@ -554,11 +573,16 @@ class DUO(transformers.PreTrainedModel):
   """HF-compatible model."""
   config_class = DUOConfig
   base_model_prefix = 'duo'
+  supports_gradient_checkpointing = True
 
   def __init__(self, config: DUOConfig):
     super().__init__(config)
     self.config = config
     self.backbone = HFDIT(config)
+
+  def _set_gradient_checkpointing(self, module, value=False):
+    if isinstance(module, (DDiTBlock, DDiTBlockCausal)):
+      module.gradient_checkpointing = value
 
   def reset_kv_cache(self):
     for block in self.backbone.blocks:

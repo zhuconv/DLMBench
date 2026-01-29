@@ -38,7 +38,7 @@ class LLaDAEvalHarness(LM):
         max_length=4096,
         batch_size=32,
         mc_num=128,
-        is_check_greedy=True,
+        is_check_greedy=False,
         cfg=0.,
         steps=1024,
         gen_length=1024,
@@ -66,30 +66,31 @@ class LLaDAEvalHarness(LM):
         '''
         super().__init__()
 
-        accelerator = accelerate.Accelerator()
-        if accelerator.num_processes > 1:
-            self.accelerator = accelerator
-        else:
-            self.accelerator = None
+        self.accelerator = accelerate.Accelerator()
         
         model_kwargs = {}
-        if self.accelerator is not None:
+        if self.accelerator.num_processes > 1:
             model_kwargs.update({'device_map': {'': f'{self.accelerator.device}'}})
 
         self.model = AutoModel.from_pretrained(pretrained, trust_remote_code=True, torch_dtype=torch.bfloat16, **model_kwargs)
         self.model.eval()
 
-        self.device = torch.device(device)
-        if self.accelerator is not None:
+        if self.accelerator.num_processes > 1:
             self.model = self.accelerator.prepare(self.model)
-            self.device = torch.device(f'{self.accelerator.device}')
-            self._rank = self.accelerator.local_process_index
-            self._world_size = self.accelerator.num_processes
-        else: 
-            self.model = self.model.to(device)
+        else:
+            self.model = self.model.to(self.accelerator.device)
 
-        self.mask_id = mask_id
+        self.device = self.accelerator.device
+        self._rank = self.accelerator.local_process_index
+        self._world_size = self.accelerator.num_processes
+
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained, trust_remote_code=True)
+        if self.tokenizer.mask_token_id is not None:
+            self.mask_id = self.tokenizer.mask_token_id
+            print(f"Using tokenizer mask_id: {self.mask_id}")
+        else:
+            self.mask_id = mask_id
+            print(f"Using default mask_id: {self.mask_id}")
 
         self.mc_num = mc_num
         self.batch_size = int(batch_size)
@@ -242,7 +243,25 @@ class LLaDAEvalHarness(LM):
         return out
 
     def loglikelihood_rolling(self, requests):
-        raise NotImplementedError
+        out = []
+        for (string,) in tqdm(requests, desc="Computing rolling likelihood..."):
+            tokens = self.tokenizer(string, return_tensors="pt")["input_ids"].to(self.device)
+            seq = tokens.view(-1)
+            
+            total_ll = 0.0
+            for i in range(0, len(seq), self.block_length):
+                target_block = seq[i : i + self.block_length]
+                if i == 0:
+                    history = torch.tensor([], dtype=torch.long, device=self.device)
+                else:
+                    history_start = max(0, i - (self.max_length - self.block_length))
+                    history = seq[history_start:i]
+                
+                block_ll = self.get_loglikelihood(history, target_block)
+                total_ll += block_ll
+            out.append(total_ll)
+            
+        return out
 
     def generate_until(self, requests: list[Instance]):
         def _tokenize(e):
@@ -274,8 +293,6 @@ class LLaDAEvalHarness(LM):
             generated_answer_ids = self.tokenizer(generated_answer)["input_ids"]
             generated_answer = self.tokenizer.decode(generated_answer_ids, skip_special_tokens=True)
             out.append(generated_answer)
-
-            self.accelerator.wait_for_everyone()
 
         return out
 

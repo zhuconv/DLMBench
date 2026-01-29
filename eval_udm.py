@@ -1,7 +1,5 @@
 import accelerate
 import torch
-import re
-from pathlib import Path
 import random
 import numpy as np
 import torch.nn.functional as F
@@ -12,10 +10,8 @@ from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
 from tqdm import tqdm
 
-from transformers import AutoTokenizer, AutoModel
-from generate import generate
-from models import *
-
+from transformers import AutoTokenizer, AutoModel, AutoConfig
+from generate import generate 
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -26,7 +22,7 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
-@register_model("duo_dist")
+@register_model("udm_dist")
 class DuoEvalHarness(LM):
     def __init__(
         self,
@@ -35,7 +31,7 @@ class DuoEvalHarness(LM):
         max_length=1024,
         batch_size=32,
         mc_num=128,
-        is_check_greedy=True,
+        is_check_greedy=False,
         cfg=0.,
         steps=1024,
         gen_length=1024,
@@ -45,53 +41,37 @@ class DuoEvalHarness(LM):
         **kwargs,
     ):
         '''
-        Args:
-            pretrained: model path.
-            mask_id: The token id of [MASK] is 126336.
-            max_length: the max sequence length.
-            batch_size: mini batch size.
-            mc_num: Monte Carlo estimation iterations
-            is_check_greedy: For certain metrics like LAMBADA, the evaluation requires the model to verify whether the answer 
-                             is generated through greedy sampling conditioned on the prompt (note that this differs from conditional
-                             generation). We implement this verification through the suffix_greedy_prediction() function, which 
-                             returns a True/False judgment used for accuracy calculation. 
-                             When is_check_greedy is set to True, the lm-evaluation-harness library automatically invokes this function. 
-                             However, since none of the metrics in the LLaDA paper (https://arxiv.org/abs/2502.09992) require this functionality, 
-                             we recommend setting is_check_greedy to False. This configuration causes suffix_greedy_prediction() to return False 
-                             by default, significantly accelerating the evaluation process.
-            cfg_scale: Unsupervised classifier-free guidance scale.
+        Implementation of the Uniform Diffusion Model (DUO) evaluation harness.
         '''
         super().__init__()
 
-        accelerator = accelerate.Accelerator()
-        if accelerator.num_processes > 1:
-            self.accelerator = accelerator
-        else:
-            self.accelerator = None
+        self.accelerator = accelerate.Accelerator()
         
         model_kwargs = {}
-        if self.accelerator is not None:
+        if self.accelerator.num_processes > 1:
             model_kwargs.update({'device_map': {'': f'{self.accelerator.device}'}})
+
+        config = AutoConfig.from_pretrained(pretrained, trust_remote_code=True)
+        self.vocab_size = config.vocab_size
 
         self.model = AutoModel.from_pretrained(pretrained, trust_remote_code=True, torch_dtype=torch.bfloat16, **model_kwargs)
         self.model.eval()
 
-        self.device = torch.device(device)
-        if self.accelerator is not None:
+        if self.accelerator.num_processes > 1:
             self.model = self.accelerator.prepare(self.model)
-            self.device = torch.device(f'{self.accelerator.device}')
-            self._rank = self.accelerator.local_process_index
-            self._world_size = self.accelerator.num_processes
-        else: 
-            self.model = self.model.to(device)
+        else:
+            self.model = self.model.to(self.accelerator.device)
 
-        self.mask_id = mask_id
+        self.device = self.accelerator.device
+        self._rank = self.accelerator.local_process_index
+        self._world_size = self.accelerator.num_processes
+
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained, trust_remote_code=True)
+        self.mask_id = mask_id 
 
         self.mc_num = mc_num
         self.batch_size = int(batch_size)
         assert mc_num % self.batch_size == 0
-        self.sampling_eps = 0.
         self.max_length = max_length
         self.is_check_greedy = is_check_greedy
 
@@ -100,6 +80,7 @@ class DuoEvalHarness(LM):
         self.gen_length = gen_length
         self.block_length = block_length
         self.remasking = remasking    
+
     @property
     def rank(self):
         return self._rank
@@ -109,15 +90,22 @@ class DuoEvalHarness(LM):
         return self._world_size
 
     def _forward_process(self, batch, prompt_index):
+        """
+        Applies Uniform Corruption: Replaces selected tokens with random tokens
+        uniformly sampled from the vocabulary.
+        """
         b, l = batch.shape
 
         target_len = (l - prompt_index.sum()).item()
+        
         k = torch.randint(1, target_len + 1, (), device=batch.device)
 
+        # Diffusion schedule x (tokens to mask)
         x = torch.round(torch.linspace(float(k), k + (b - 1) * (target_len / b), steps=b, device=batch.device)).long()
         x = ((x - 1) % target_len) + 1
         assert x.min() >= 1 and x.max() <= target_len
 
+        # Generate mask indices
         indices = torch.arange(target_len, device=batch.device).repeat(b, 1)
         is_mask = indices < x.unsqueeze(1)
 
@@ -126,25 +114,19 @@ class DuoEvalHarness(LM):
 
         is_mask = torch.cat((torch.zeros(b, prompt_index.sum(), dtype=torch.bool, device=batch.device), is_mask), dim=1)
 
-        noisy_batch = torch.where(is_mask, self.mask_id, batch)
+        # Random Uniform Noise
+        random_noise = torch.randint(0, self.vocab_size, batch.shape, device=batch.device)
+        noisy_batch = torch.where(is_mask, random_noise, batch)
 
-        return noisy_batch, (x / target_len).unsqueeze(1).repeat(1, l)
+        # Return 1D timesteps: Shape (B,)
+        timesteps = (x / target_len)
+        
+        return noisy_batch, timesteps, is_mask
 
     @torch.no_grad()
-    def get_logits(self, batch, prompt_index):
-        if self.cfg > 0.:
-            assert len(prompt_index) == batch.shape[1]
-            prompt_index = prompt_index.unsqueeze(0).repeat(batch.shape[0], 1)
-            un_batch = batch.clone()
-            un_batch[prompt_index] = self.mask_id
-            batch = torch.cat([batch, un_batch])
-
-        logits = self.model(batch).logits
-
-        if self.cfg > 0.:
-            logits, un_logits = torch.chunk(logits, 2, dim=0)
-            logits = un_logits + (self.cfg + 1) * (logits - un_logits)
-        return logits[:, :batch.shape[1]]
+    def get_logits(self, batch, timesteps):
+        logits = self.model(input_ids=batch, timesteps=timesteps, return_dict=True).logits
+        return logits
 
     @torch.no_grad()
     def get_loglikelihood(self, prefix, target):
@@ -155,13 +137,20 @@ class DuoEvalHarness(LM):
 
         loss_acc = []
         for _ in range(self.mc_num // self.batch_size):
-            perturbed_seq, p_mask = self._forward_process(seq, prompt_index)
+            noisy_seq, timesteps, is_mask = self._forward_process(seq, prompt_index)
 
-            mask_indices = perturbed_seq == self.mask_id
+            # Pass 1D timesteps to model
+            logits = self.get_logits(noisy_seq, timesteps)
 
-            logits = self.get_logits(perturbed_seq, prompt_index)
-
-            loss = F.cross_entropy(logits[mask_indices], seq[mask_indices], reduction='none') / p_mask[mask_indices]
+            # Expand timesteps to (B, L) for loss weighting
+            p_mask = timesteps.unsqueeze(1).expand_as(is_mask)
+            
+            # Select only corrupted tokens for loss
+            loss = F.cross_entropy(logits[is_mask], seq[is_mask], reduction='none')
+            
+            # Normalize by probability of masking (timestep value at that position)
+            loss = loss / p_mask[is_mask]
+            
             loss = loss.sum() / self.batch_size
             loss_acc.append(loss.item())
 
@@ -173,21 +162,21 @@ class DuoEvalHarness(LM):
             return False
 
         seq = torch.full((1, len(prefix) + len(target)), self.mask_id, device=self.device)
-        prompt_index = torch.arange(seq.shape[1], device=self.device) < len(prefix)
         prefix, target = prefix.to(self.device), target.to(self.device)
+        
         seq[0, :len(prefix)] = prefix
+        
+        random_target = torch.randint(0, self.vocab_size, (len(target),), device=self.device)
+        seq[0, len(prefix):] = random_target
+        
+        timesteps = torch.ones((1,), dtype=torch.float, device=self.device)
 
-        for i in range(len(target)):
-            mask_index = (seq == self.mask_id)
-            logits = self.get_logits(seq, prompt_index)[mask_index]
-            x0 = torch.argmax(logits, dim=-1)
+        logits = self.get_logits(seq, timesteps)
+        
+        target_logits = logits[0, len(prefix):]
+        x0 = torch.argmax(target_logits, dim=-1)
 
-            p = torch.softmax(logits.to(torch.float32), dim=-1)
-            confidence = torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)).squeeze(dim=-1)
-            _, index = torch.sort(confidence, descending=True)
-            x0[index[1:]] = self.mask_id
-            seq[mask_index] = x0.clone()
-        correct = target == seq[0, len(prefix):]
+        correct = target == x0
         correct = torch.all(correct)
         return correct
 
@@ -215,15 +204,11 @@ class DuoEvalHarness(LM):
                 "target": target,
             }
 
-        ds = []
         ds = [{"prefix": req.args[0], "target": req.args[1]} for req in requests]
         ds = Dataset.from_list(ds)
         ds = ds.map(_tokenize)
         ds = ds.with_format("torch")
-        prompt_len = [len(x["prefix"]) + len(x["target"]) for x in ds]
-
-        assert max(prompt_len) <= 4096
-
+        
         out = []
         with torch.no_grad():
             for elem in tqdm(ds, desc="Computing likelihood..."):
@@ -239,8 +224,26 @@ class DuoEvalHarness(LM):
         return out
 
     def loglikelihood_rolling(self, requests):
-        raise NotImplementedError
-
+        out = []
+        for (string,) in tqdm(requests, desc="Computing rolling likelihood..."):
+            tokens = self.tokenizer(string, return_tensors="pt")["input_ids"].to(self.device)
+            seq = tokens.view(-1)
+            
+            total_ll = 0.0
+            for i in range(0, len(seq), self.block_length):
+                target_block = seq[i : i + self.block_length]
+                if i == 0:
+                    history = torch.tensor([], dtype=torch.long, device=self.device)
+                else:
+                    history_start = max(0, i - (self.max_length - self.block_length))
+                    history = seq[history_start:i]
+                
+                block_ll = self.get_loglikelihood(history, target_block)
+                total_ll += block_ll
+            out.append(total_ll)
+            
+        return out
+    
     def generate_until(self, requests: list[Instance]):
         def _tokenize(e):
             return {
@@ -259,15 +262,23 @@ class DuoEvalHarness(LM):
             prompt = elem["question"].unsqueeze(0).to(self.device)
             stop_tokens = elem["until"]
  
-            generated_answer = generate(self.model, prompt, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length, 
-                                        temperature=0, cfg_scale=self.cfg, remasking=self.remasking, mask_id=self.mask_id)
+            generated_answer = generate(
+                self.model, 
+                prompt, 
+                steps=self.steps, 
+                gen_length=self.gen_length, 
+                block_length=self.block_length, 
+                temperature=0, 
+                cfg_scale=self.cfg, 
+                remasking=self.remasking, 
+                mask_id=self.mask_id
+            )
             
             generated_answer = self.tokenizer.decode(generated_answer[0][prompt.shape[1]:], skip_special_tokens=False)
             for stop_seq in stop_tokens:
                     if stop_seq in generated_answer:
                         generated_answer = generated_answer.split(stop_seq)[0]
 
-            # remove special tokens
             generated_answer_ids = self.tokenizer(generated_answer)["input_ids"]
             generated_answer = self.tokenizer.decode(generated_answer_ids, skip_special_tokens=True)
             out.append(generated_answer)
@@ -280,4 +291,3 @@ class DuoEvalHarness(LM):
 if __name__ == "__main__":
     set_seed(1234)
     cli_evaluate()
-    

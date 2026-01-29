@@ -5,11 +5,13 @@ import numpy as np
 import torch.nn.functional as F
 from datasets import Dataset
 from lm_eval.__main__ import cli_evaluate
+from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModel
-from models import *
+from transformers import AutoTokenizer, AutoModel, AutoConfig
+from generate import generate
+from noise import LogLinearNoise
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -29,48 +31,62 @@ class BD3LMEvalHarness(LM):
         mc_num=128,
         device="cuda",
         dtype=torch.bfloat16,
+        # Generation args
+        steps=64,
+        gen_length=128,
+        block_length=32,
         **kwargs,
     ):
         super().__init__()
-        accelerator = accelerate.Accelerator()
-        self.accelerator = accelerator if accelerator.num_processes > 1 else None
+        self.accelerator = accelerate.Accelerator()
         
         model_kwargs = {}
-        if self.accelerator:
+        if self.accelerator.num_processes > 1:
             model_kwargs.update({'device_map': {'': f'{self.accelerator.device}'}})
 
         config = AutoConfig.from_pretrained(pretrained, trust_remote_code=True, torch_dtype=dtype, **model_kwargs)
         config.attn_backend = 'sdpa'
-        self.model = AutoModel.from_config(config)
-        # self.model.config.attn_backend = 'sdpa'
+        
+        self.model = AutoModel.from_pretrained(pretrained, config=config, trust_remote_code=True, torch_dtype=dtype, **model_kwargs)
         self.model.eval()
 
-        self.device = torch.device(device)
-        if self.accelerator:
+        if self.accelerator.num_processes > 1:
             self.model = self.accelerator.prepare(self.model)
-            self.device = torch.device(f'{self.accelerator.device}')
-        else: 
-            self.model = self.model.to(device)
+        else:
+            self.model = self.model.to(self.accelerator.device)
 
-        self.dtype = dtype
+        self.device = self.accelerator.device
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained, trust_remote_code=True)
-        self.mask_id = mask_id
+        
+        if self.tokenizer.mask_token_id is not None:
+            self.mask_id = self.tokenizer.mask_token_id
+            print(f"Using tokenizer mask_id: {self.mask_id}")
+        else:
+            self.mask_id = mask_id
+            print(f"Using default mask_id: {self.mask_id}")
+            
         self.mc_num = mc_num
         self.batch_size = int(batch_size)
-        self.max_length = max_length
+        self.dtype = dtype
+        
+        # Generation parameters
+        self.steps = steps
+        self.gen_length = gen_length
+        self.block_length = getattr(config, 'block_size', block_length)
+        
+        self.noise = LogLinearNoise()
+
+    def _sigma_from_p(self, p):
+        return torch.min(- torch.log(1 - p), self.noise.sigma_max)
 
     def _forward_process(self, batch, prompt_index):
         b, l = batch.shape
         target_len = (l - prompt_index.sum()).item()
         
         k = torch.randint(1, target_len + 1, (), device=batch.device)
-        
-        # Calculate schedule
         x = torch.round(torch.linspace(float(k), k + (b - 1) * (target_len / b), steps=b, device=batch.device)).long()
         x = ((x - 1) % target_len) + 1
-        
-        timesteps_1d = (x / target_len) # Shape (B,)
-        timesteps_2d = timesteps_1d.unsqueeze(1).repeat(1, l) # Shape (B, L)
+        timesteps_1d = (x / target_len) 
 
         indices = torch.arange(target_len, device=batch.device).repeat(b, 1)
         is_mask = indices < x.unsqueeze(1)
@@ -79,9 +95,16 @@ class BD3LMEvalHarness(LM):
             
         is_mask = torch.cat((torch.zeros(b, prompt_index.sum(), dtype=torch.bool, device=batch.device), is_mask), dim=1)
         
-        noisy_batch = torch.where(is_mask, self.mask_id, batch)
+        xt = torch.where(is_mask, self.mask_id, batch)
         
-        return noisy_batch, timesteps_1d.to(dtype=self.dtype), timesteps_2d.to(dtype=self.dtype)
+        model_input = torch.cat([xt, batch], dim=1)
+        
+        p_mask = timesteps_1d.unsqueeze(1).repeat(1, l)
+        
+        # Convert t (probability p) to sigma
+        sigma = self._sigma_from_p(timesteps_1d)
+        
+        return model_input, sigma.to(dtype=self.dtype), p_mask.to(dtype=self.dtype), is_mask
 
     @torch.no_grad()
     def get_loglikelihood(self, prefix, target):
@@ -91,18 +114,16 @@ class BD3LMEvalHarness(LM):
 
         loss_acc = []
         for _ in range(self.mc_num // self.batch_size):
-            noisy_seq, t_1d, t_2d = self._forward_process(seq, prompt_index)
+            model_input, sigma, t_2d, is_mask = self._forward_process(seq, prompt_index)
             
-            # Pass 1D timesteps to model
-            # import pdb; pdb.set_trace()
-            logits = self.model(input_ids=noisy_seq, timesteps=t_1d, sample_mode=True).logits
+            # Pass sigma as timesteps
+            logits = self.model(input_ids=model_input, timesteps=sigma, sample_mode=False).logits
             
-            mask_indices = noisy_seq == self.mask_id
+            loss = F.cross_entropy(logits[is_mask], seq[is_mask], reduction='none')
             
-            # Use 2D timesteps for weighting the loss
-            p_mask = t_2d[mask_indices]
-
-            loss = F.cross_entropy(logits[mask_indices], seq[mask_indices], reduction='none') / p_mask
+            # Weighting by 1/t (which is -loss_scaling for LogLinearNoise)
+            loss = loss / t_2d[is_mask]
+            
             loss = loss.sum() / self.batch_size
             loss_acc.append(loss.item())
 
@@ -127,10 +148,74 @@ class BD3LMEvalHarness(LM):
         return out
 
     def loglikelihood_rolling(self, requests):
-        raise NotImplementedError
+        out = []
+        for (string,) in tqdm(requests, desc="Computing rolling likelihood..."):
+            tokens = self.tokenizer(string, return_tensors="pt")["input_ids"].to(self.device)
+            seq = tokens.view(-1)
+            
+            total_ll = 0.0
+            for i in range(0, len(seq), self.block_length):
+                target_block = seq[i : i + self.block_length]
+                if i == 0:
+                    history = torch.tensor([], dtype=torch.long, device=self.device)
+                else:
+                    history_start = max(0, i - (self.max_length - self.block_length))
+                    history = seq[history_start:i]
+                
+                block_ll = self.get_loglikelihood(history, target_block)
+                total_ll += block_ll
+            out.append(total_ll)
+            
+        return out
     
     def generate_until(self, requests):
-        raise NotImplementedError("Generation not implemented yet for BD3LM eval")
+        def _tokenize(e):
+            return {
+                "question": self.tokenizer(e["question"])["input_ids"],
+                "question_text": e["question"],
+                "until": e["until"],
+            }
+
+        ds = [{"question": req.args[0], "until": req.args[1]['until']} for req in requests]
+        ds = Dataset.from_list(ds)
+        ds = ds.map(_tokenize)
+        ds = ds.with_format("torch")
+
+        out = []
+        for elem in tqdm(ds, desc="Generating..."):
+            prompt = elem["question"].unsqueeze(0).to(self.device)
+            stop_tokens = elem["until"]
+ 
+            generated_answer = generate(
+                self.model, 
+                prompt, 
+                steps=self.steps, 
+                gen_length=self.gen_length, 
+                block_length=self.block_length,
+                temperature=0, 
+                mask_id=self.mask_id
+            )
+            
+            # Decode
+            # Generated answer contains [Prompt + Gen]
+            gen_only = generated_answer[0][prompt.shape[1]:]
+            decoded_text = self.tokenizer.decode(gen_only, skip_special_tokens=False)
+            
+            # Handle stop tokens
+            for stop_seq in stop_tokens:
+                if stop_seq in decoded_text:
+                    decoded_text = decoded_text.split(stop_seq)[0]
+
+            # Encode and decode to ensure clean text output
+            generated_answer_ids = self.tokenizer(decoded_text, add_special_tokens=False)["input_ids"]
+            final_text = self.tokenizer.decode(generated_answer_ids, skip_special_tokens=True)
+            
+            out.append(final_text)
+
+            if self.accelerator.num_processes > 1:
+                self.accelerator.wait_for_everyone()
+
+        return out
 
 if __name__ == "__main__":
     set_seed(1234)

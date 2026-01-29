@@ -1393,6 +1393,7 @@ class LLaDAModelLM(PreTrainedModel):
     config_class = LLaDAConfig
     base_model_prefix = "model"
     _no_split_modules = ["LLaDABlock", "LLaDASequentialBlock", "LLaDALlamaBlock"]
+    supports_gradient_checkpointing = True
 
     def __init__(self, config: LLaDAConfig, model: Optional[LLaDAModel] = None, init_params: bool = False):
         super().__init__(config)
@@ -1404,6 +1405,11 @@ class LLaDAModelLM(PreTrainedModel):
             self.model = LLaDAModel(model_config, init_params=init_params)
         else:
             self.model = model
+
+    def _set_gradient_checkpointing(self, module, value=False):
+        if isinstance(module, LLaDAModel):
+            strategy = ActivationCheckpointingStrategy.whole_layer if value else None
+            module.set_activation_checkpointing(strategy)
 
     def forward(
         self,
