@@ -1,21 +1,19 @@
 #!/bin/bash
 #SBATCH --output=./logs/train_%x_%j.log
-#SBATCH --nodes=1
-#SBATCH --gres=gpu:8
-#SBATCH --mem=512G
-#SBATCH --partition=p5-main
-#SBATCH --time=1-12:00:00
-#SBATCH --ntasks-per-node=1         # One task per GPU? per node
-#SBATCH --cpus-per-task=96
+#SBATCH --nodes=4
+#SBATCH --partition=gh
+#SBATCH --time=36:00:00
+#SBATCH --ntasks-per-node=1
+#SBATCH --mail-type=begin,end,fail
+#SBATCH --mail-user=jiajunzhu@utexas.edu
 
 # source ~/.bashrc
 # conda activate ibm
+source .venv/bin/activate
 
 export LOGLEVEL=INFO
 export TRITON_CACHE_DIR=/tmp/triton_cache
 export WANDB_MODE=disabled 
-# export CUDA_LAUNCH_BLOCKING=1
-source .venv/bin/activate
 
 # Set CUDA_HOME for DeepSpeed
 if [ -z "$CUDA_HOME" ]; then
@@ -27,22 +25,22 @@ if [ -z "$CUDA_HOME" ]; then
     fi
 fi
 
-
 CONFIG_NAME=$1  # "mdm_700m" "bdm_700m" "ar_700m" "udm_700m"
+
 # --- Detect nodes ---
 if [[ -z "${SLURM_JOB_NAME:-}" || "$SLURM_JOB_NAME" == "intern" ]]; then
     echo "Interactive mode detected."
-    NNODES=1
-    # NGPUS=1
+    NNODES=8
     CONFIG_NAME=${CONFIG_NAME:-"ar_700m"}
     command="torchrun"
-    head_node_ip=$(hostname --ip-address)
+    head_node_ip=c608-052 #$(hostname --ip-address)
     # Auto-detect number of GPUs in interactive mode
     if [ -z "$NGPUS" ]; then
         NGPUS=$(nvidia-smi --list-gpus | wc -l)
         echo "Auto-detected $NGPUS GPU(s) available"
     fi
 else
+    CONFIG_NAME=${SLURM_JOB_NAME}
     nodes=($(scontrol show hostnames $SLURM_JOB_NODELIST))
     head_node=${nodes[0]}
     NNODES=${#nodes[@]}
@@ -55,16 +53,24 @@ CONFIG_PATH="./configs/${CONFIG_NAME}.json"
 
 echo "Head Node IP: $head_node_ip; NNODES: $NNODES"
 
-NGPUS=${NGPUS:-4}
-CONTEXT_LEN=${CONTEXT_LEN:-4096}
+# For 8 nodes with 1 GPU each, total GPUs = 8
+# Each node runs 1 process, so nproc_per_node=1
+NGPUS_PER_NODE=1
+TOTAL_GPUS=$((NNODES * NGPUS_PER_NODE))
 
-### Hyperparameters
+echo "Total GPUs: $TOTAL_GPUS (${NNODES} nodes × ${NGPUS_PER_NODE} GPU/node)"
+
+### Hyperparameters - Optimized for GH200 (100GB GPU)
 setting=${setting:-"20B/4k"}
 # ==== batch size setting ====
+# Optimized: Increased micro_batch_size from 4 to 20 for better GPU utilization
+# For 700M model on 100GB GPU, we can use much larger batch sizes
 if [[ $setting == *"4k"* ]]; then
   global_batch_size=512
   local_batch_size=$(( 512 / NNODES ))
-  micro_batch_size=8   # = 4
+  # Increased from 4 to 20: better GPU utilization on 100GB GPUs
+  # Adjust based on actual memory usage (target: 70-85% GPU memory)
+  micro_batch_size=${MICRO_BATCH_SIZE:-8}
 fi
 # ==== max_tokens ====
 if [[ $setting == *"20B"* ]]; then
@@ -73,28 +79,25 @@ elif [[ $setting == *"100B"* ]]; then
   max_tokens=100000000000              # 1e11
 fi
 # ==== final args ====
-batch_size=$(( local_batch_size / NGPUS ))
+batch_size=$(( local_batch_size / NGPUS_PER_NODE ))
 gradient_accumulation_steps=$(( batch_size / micro_batch_size ))
-max_steps=$(( max_tokens / (global_batch_size * CONTEXT_LEN) )) # 10000 
+# Use context_len in calculation instead of hardcoded 4096
+context_len=${CONTEXT_LEN:-4096}
+max_steps=$(( max_tokens / (global_batch_size * context_len) ))
 
 # ../../hf_datasets/SlimPajama-627B
 # "/vcc-data/peihaow/SlimPajama-627B"
 
-# python -m debugpy --wait-for-client --listen 0.0.0.0:5000 -m torch.distributed.launch
-# Set CUDA_VISIBLE_DEVICES based on available GPUs
-if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
-    # Generate device list: 0,1,2,...,NGPUS-1
-    CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NGPUS - 1)))
-fi
-export CUDA_VISIBLE_DEVICES
+# Set CUDA_VISIBLE_DEVICES - each node only sees GPU 0
+export CUDA_VISIBLE_DEVICES=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-${command} --nproc_per_node $NGPUS --nnodes $NNODES \
+${command} --nproc_per_node $NGPUS_PER_NODE --nnodes $NNODES \
         --rdzv_endpoint $head_node_ip:29512 \
-        --rdzv_id $RANDOM \
+        --rdzv_id 12345 \
         --rdzv_backend c10d \
         train.py \
-        --deepspeed "ds_config.json" \
+        --deepspeed "${DS_CONFIG:-ds_config.json}" \
         --dataset_cache_dir "../hf_datasets/SlimPajama-627B" \
         --output_dir "output/${CONFIG_NAME}" \
         --config ${CONFIG_PATH} \
@@ -103,7 +106,7 @@ ${command} --nproc_per_node $NGPUS --nnodes $NNODES \
         --gradient_accumulation_steps $gradient_accumulation_steps \
         --report_to none \
         --max_steps $max_steps \
-        --context_len $CONTEXT_LEN \
+        --context_len $context_len \
         --warmup_ratio 0.01 \
         --weight_decay 0.1 \
         --learning_rate 4e-4 \
@@ -113,8 +116,10 @@ ${command} --nproc_per_node $NGPUS --nnodes $NNODES \
         --logging_steps 10 \
         --do_train True \
         --do_predict True \
+        --save_total_limit 5 \
         --save_strategy "steps" \
-        --gradient_checkpointing True \
         --dataloader_num_workers 8 \
         --dataloader_pin_memory True \
+        --gradient_checkpointing True \
         --bf16 True
+

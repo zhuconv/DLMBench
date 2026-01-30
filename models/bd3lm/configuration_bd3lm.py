@@ -14,7 +14,7 @@ class BD3LMConfig(PretrainedConfig):
     model_length: int = 1024,
     cross_attn: bool = True,
     adaln: bool = True,
-    attn_backend: str = 'flex',
+    attn_backend: str = 'flex',  # 'flex', 'sdpa', or 'tilelang'
     causal: bool = False,
     hidden_dim: int = 768,
     cond_dim: int = 129,

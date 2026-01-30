@@ -17,6 +17,16 @@ try:
 except:
   FLEX_ATTN_AVAILABLE = False
 
+try:
+  from .tilelang_attention import (
+    tilelang_attention,
+    tilelang_block_diff_attention,
+    create_block_diff_mask as create_tilelang_mask,
+    TILELANG_AVAILABLE
+  )
+except ImportError:
+  TILELANG_AVAILABLE = False
+
 from .configuration_bd3lm import BD3LMConfig
 
 # Flags required to enable jit fusion kernels
@@ -384,6 +394,25 @@ class DDiTBlock(nn.Module):
       qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2], mask=mask)
     x = einops.rearrange(x, 'b h s d -> b s (h d)')
     return x
+
+  def cross_attn_tilelang(self, qkv, mask=None):
+    """TileLang flash attention backend."""
+    # qkv shape: [batch, seq_len, 3, heads, dim]
+    q = qkv[:, :, 0, :, :]  # [batch, seq_len, heads, dim]
+    k = qkv[:, :, 1, :, :]
+    v = qkv[:, :, 2, :, :]
+
+    if mask is not None:
+      # Convert mask to boolean if needed
+      if mask.dtype != torch.bool:
+        mask = mask.bool()
+      x = tilelang_block_diff_attention(q, k, v, mask)
+    else:
+      x = tilelang_attention(q, k, v, is_causal=self.causal)
+
+    # Reshape output: [batch, seq_len, heads, dim] -> [batch, seq_len, heads*dim]
+    x = einops.rearrange(x, 'b s h d -> b s (h d)')
+    return x
   
   def forward(self, x, rotary_cos_sin, c, mask=None,
               sample_mode=False, store_kv=False):
@@ -422,12 +451,14 @@ class DDiTBlock(nn.Module):
     else:
       qkv = self.get_qkv(x, rotary_cos_sin, store_kv=store_kv)
 
-    if self.attn_backend == 'flex' and FLEX_ATTN_AVAILABLE:
+    if self.attn_backend == 'tilelang' and TILELANG_AVAILABLE:
+      x = self.cross_attn_tilelang(qkv, mask=mask)
+    elif self.attn_backend == 'flex' and FLEX_ATTN_AVAILABLE:
       x = self.cross_attn_flex(qkv, mask=mask)
-    elif self.attn_backend == 'sdpa' or not FLEX_ATTN_AVAILABLE:
+    elif self.attn_backend == 'sdpa' or (not FLEX_ATTN_AVAILABLE and not TILELANG_AVAILABLE):
       x = self.cross_attn(x, qkv, mask=mask)
     else:
-      raise ValueError('Unknown attention backend')
+      raise ValueError(f'Unknown attention backend: {self.attn_backend}')
     
     if self.kv_cache is not None:
       x = x[:, -self.block_size:]
@@ -545,17 +576,21 @@ class DITBackbone(nn.Module):
     
   def gen_mask(self, seqlen, block_size, attn_backend='sdpa'):
     """Genererates attention mask"""
-    if attn_backend == 'flex' and FLEX_ATTN_AVAILABLE:
+    if attn_backend == 'tilelang' and TILELANG_AVAILABLE:
+      # TileLang uses boolean mask [seq_len, seq_len]
+      mask = create_tilelang_mask(seqlen, block_size)
+      self.register_buffer('mask', mask, persistent=False)
+    elif attn_backend == 'flex' and FLEX_ATTN_AVAILABLE:
       self.mask = create_block_mask(
         partial(block_diff_mask, block_size=block_size, n=seqlen),
         B=None, H=None, Q_LEN=seqlen*2, KV_LEN=seqlen*2)
-    elif attn_backend == 'sdpa' or not FLEX_ATTN_AVAILABLE:
+    elif attn_backend == 'sdpa' or (not FLEX_ATTN_AVAILABLE and not TILELANG_AVAILABLE):
       mask = block_diff_mask(
-        b=None, h=None, q_idx=torch.arange(seqlen*2)[:, None], 
+        b=None, h=None, q_idx=torch.arange(seqlen*2)[:, None],
         kv_idx=torch.arange(seqlen*2)[None, :], block_size=block_size, n=seqlen)
       self.register_buffer('mask', mask, persistent=False)
     else:
-      raise ValueError('Unknown attention backend')
+      raise ValueError(f'Unknown attention backend: {attn_backend}')
 
   def forward(self, indices, sigma, sample_mode=False,
              store_kv=False, output_hidden_states=False):
@@ -581,13 +616,15 @@ class DITBackbone(nn.Module):
         curr_half_len = x.shape[1] // 2
         if curr_half_len != self.n:
           n = curr_half_len
-          if self.config.attn_backend == 'flex' and FLEX_ATTN_AVAILABLE:
+          if self.config.attn_backend == 'tilelang' and TILELANG_AVAILABLE:
+            mask = create_tilelang_mask(n, self.block_size, device=x.device)
+          elif self.config.attn_backend == 'flex' and FLEX_ATTN_AVAILABLE:
             mask = create_block_mask(
               partial(block_diff_mask, block_size=self.block_size, n=n),
               B=None, H=None, Q_LEN=n*2, KV_LEN=n*2).to(x.device)
           else:
             mask = block_diff_mask(
-              b=None, h=None, q_idx=torch.arange(n*2)[:, None], 
+              b=None, h=None, q_idx=torch.arange(n*2)[:, None],
               kv_idx=torch.arange(n*2)[None, :], block_size=self.block_size, n=n).to(x.device)
         rotary_cos_sin = self.rotary_emb(x[:, :n])
       else:
