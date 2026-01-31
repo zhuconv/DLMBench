@@ -89,15 +89,21 @@ if TILELANG_AVAILABLE:
                 T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
                 T.fill(acc_o, 0)
                 T.fill(logsum, 0)
-                T.fill(scores_max, -T.infinity(accum_dtype))
+                # Use large negative finite value instead of -inf to avoid NaN from -inf - (-inf)
+                T.fill(scores_max, -1e30)
 
                 loop_range = T.ceildiv(seq_len, block_N)
 
                 for k in T.Pipelined(loop_range, num_stages=1):
                     T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared)
 
-                    # Compute block diffusion mask inline
-                    # q_idx = bx * block_M + i, kv_idx = k * block_N + j
+                    # First compute QK^T
+                    T.clear(acc_s)
+                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+
+                    # Apply block diffusion mask using a large negative value instead of -inf
+                    # to avoid numerical issues with reduce operations
+                    mask_value = -1e9  # Large negative but finite
                     for i, j in T.Parallel(block_M, block_N):
                         q_idx = bx * block_M + i
                         kv_idx = k * block_N + j
@@ -127,18 +133,16 @@ if TILELANG_AVAILABLE:
                         # Block Causal: both in x0, q_block >= kv_block
                         block_causal = (block_q >= block_kv) & x0_flag_kv & x0_flag_q
 
-                        # Combined mask
+                        # Combined mask - set invalid positions to large negative value
                         valid = block_diagonal | offset_block_causal | block_causal
-
-                        acc_s[i, j] = T.if_then_else(valid, 0, -T.infinity(acc_s.dtype))
-
-                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                        acc_s[i, j] = T.if_then_else(valid, acc_s[i, j], mask_value)
                     T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared)
 
                     T.copy(scores_max, scores_max_prev)
-                    T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+                    # Compute block max with clear=True, then explicitly take max with running max
+                    T.reduce_max(acc_s, scores_sum, dim=1, clear=True)  # Use scores_sum as temp
                     for i in T.Parallel(block_M):
-                        scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
+                        scores_max[i] = T.max(scores_max_prev[i], scores_sum[i])
                     for i in T.Parallel(block_M):
                         scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                     for i, j in T.Parallel(block_M, dim):
@@ -147,7 +151,7 @@ if TILELANG_AVAILABLE:
                         acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
                     T.copy(acc_s, acc_s_cast)
                     T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
-                    T.reduce_sum(acc_s, scores_sum, dim=1)
+                    T.reduce_sum(acc_s, scores_sum, dim=1, clear=True)
                     for i in T.Parallel(block_M):
                         logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
 
@@ -206,28 +210,33 @@ if TILELANG_AVAILABLE:
                 T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
                 T.fill(acc_o, 0)
                 T.fill(logsum, 0)
-                T.fill(scores_max, -T.infinity(accum_dtype))
+                # Use large negative finite value instead of -inf
+                T.fill(scores_max, -1e30)
 
                 loop_range = T.ceildiv((bx + 1) * block_M, block_N)
 
                 for k in T.Pipelined(loop_range, num_stages=1):
                     T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared)
 
-                    # Causal mask
+                    # First compute QK^T
+                    T.clear(acc_s)
+                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+
+                    # Then apply causal mask using large negative but finite value
+                    mask_value = -1e9
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(
                             bx * block_M + i >= k * block_N + j,
-                            0,
-                            -T.infinity(acc_s.dtype)
+                            acc_s[i, j],
+                            mask_value
                         )
 
-                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                     T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared)
 
                     T.copy(scores_max, scores_max_prev)
-                    T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+                    T.reduce_max(acc_s, scores_sum, dim=1, clear=True)  # Use scores_sum as temp
                     for i in T.Parallel(block_M):
-                        scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
+                        scores_max[i] = T.max(scores_max_prev[i], scores_sum[i])
                     for i in T.Parallel(block_M):
                         scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                     for i, j in T.Parallel(block_M, dim):
@@ -236,7 +245,7 @@ if TILELANG_AVAILABLE:
                         acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
                     T.copy(acc_s, acc_s_cast)
                     T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
-                    T.reduce_sum(acc_s, scores_sum, dim=1)
+                    T.reduce_sum(acc_s, scores_sum, dim=1, clear=True)
                     for i in T.Parallel(block_M):
                         logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
 
