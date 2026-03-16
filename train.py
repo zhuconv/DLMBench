@@ -479,7 +479,7 @@ def train():
     # Select model & collator
     if "bd" in model_args.config.lower():
         print("*** Using BDM: Block Masking + Dual Stream ***")
-        data_collator = DataCollatorForBlockDiffusion(tokenizer=tokenizer, block_size=32)
+        data_collator = DataCollatorForBlockDiffusion(tokenizer=tokenizer, block_size=config.block_size)
         TrainerClass = DiffusionTrainer
         Model_CLS = AutoModel
     elif "udm" in model_args.config.lower():
@@ -575,9 +575,9 @@ def train():
     print(f"*** Saving training logs to {log_path} ***")
 
     trainer = TrainerClass(
-        model=model, 
-        tokenizer=tokenizer, 
-        args=training_args, 
+        model=model,
+        processing_class=tokenizer,
+        args=training_args,
         train_dataset=train_dataset,
         eval_dataset=valid_dataset,
         data_collator=data_collator,
