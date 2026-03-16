@@ -1,0 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/cu129
+transformers
+torch==2.8
+accelerate
+datasets
+deepspeed
+hf-xet
+lm-eval
+omegaconf
+wandb
+flash_attn @ https://github.com/gueraf/flash-attention/releases/download/dev-c2f5281/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_aarch64.whl

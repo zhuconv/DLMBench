@@ -8,7 +8,8 @@ dependencies = [
     "accelerate==1.11.0",
     "datasets==3.6.0",
     "deepspeed>=0.18.2",
-    "flash-attn",
+    "flash-attn ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flash-attn-3 ; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "hf-xet>=1.2.0",
     "lm-eval==0.4.8",
     "omegaconf>=2.3.0",
@@ -18,3 +19,7 @@ dependencies = [
 
 [tool.uv.sources]
 flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl" }
+flash-attn-3 = { url = "https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.01.19-8b0dc47/flash_attn_3-3.0.0b1%2B20260119.cu129torch280cxx11abitrue.a0f9f4-cp39-abi3-linux_aarch64.whl" }
+
+
+

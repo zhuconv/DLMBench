@@ -1,9 +1,0 @@
-|    Tasks    |Version|Filter|n-shot| Metric |   |Value |   |Stderr|
-|-------------|------:|------|-----:|--------|---|-----:|---|-----:|
-|arc_challenge|      1|none  |     0|acc     |↑  |0.2005|±  |0.0117|
-|             |       |none  |     0|acc_norm|↑  |0.2483|±  |0.0126|
-|hellaswag    |      1|none  |     0|acc     |↑  |0.2559|±  |0.0044|
-|             |       |none  |     0|acc_norm|↑  |0.2645|±  |0.0044|
-|piqa         |      1|none  |     0|acc     |↑  |0.5234|±  |0.0117|
-|             |       |none  |     0|acc_norm|↑  |0.5207|±  |0.0117|
-
